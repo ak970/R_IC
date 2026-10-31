@@ -1,0 +1,55 @@
+Quick Guide on Changing Titles, Legends, and Axes
+All visual labels in ggplot2 are modified using standard arguments. Here is exactly where and how to change them:
+
+1. Changing Plot Titles and Subtitles
+Located inside the labs(...) block at the bottom of each plot:
+
+labs(
+  title    = "Your Custom Main Title Here",
+  subtitle = "Your Custom Subtitle Here",
+  x        = "Custom X-Axis Label",
+  y        = "Custom Y-Axis Label"
+)
+
+2. Changing Legend Title and Legend Category Labels
+Use name = ... and labels = ... inside the respective scale_..._manual() function:
+For Colors / Outlines (color):
+
+scale_color_manual(
+  name   = "Hydrological Regime",                  # Legend Title
+  values = c("0" = "#2b5c8f", "1" = "#d95f02"),   # Colors
+  labels = c("0" = "Natural Flow", "1" = "Regulated Flow") # Legend Labels
+)
+For Shading / Fills (fill):
+
+scale_fill_manual(
+  name   = "Climate Zone",                         # Legend Title
+  labels = c("Arid Zone", "Semi-Arid", "Humid")    # Custom category labels
+)
+For Point Shapes (shape):
+
+scale_shape_discrete(
+  name   = "Climate Type",
+  labels = c("Zone A", "Zone B", "Zone C")
+)
+
+3. Changing X-Axis Values and Display Names
+If X is Discrete / Categories (e.g., Climate, Geology, Years):
+Use scale_x_discrete() to rename the categories shown on the axis ticks:
+
+scale_x_discrete(
+  labels = c(
+    "Class1" = "Dry Arid",
+    "Class2" = "Semi-Arid Tropics",
+    "Class3" = "Humid Subtropical"
+  )
+)
+
+If X is Continuous (e.g., AI, Porosity, IC):
+Use scale_x_continuous() to set custom limits or tick intervals:
+
+scale_x_continuous(
+  limits = c(0, 100),               # Set min and max bounds
+  breaks = seq(0, 100, by = 20),    # Tick markers: 0, 20, 40, 60, 80, 100
+  labels = function(x) paste0(x, "%") # Optional: format as percentage
+)

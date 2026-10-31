@@ -168,6 +168,12 @@ p1 <- ggplot(catchment_data, aes(x = Regime, y = delta_IC, fill = Regime)) +
     x = "Hydrological Regime",
     y = expression(Delta * "IC (Median"[2021] * " - Median"[1990] * ") [-]")
   ) +
+  scale_x_discrete(
+    labels = c(
+      "0" = "Perennial",
+      "1" = "Intermittent"
+    )
+  ) +
   theme_bw(base_size = 14) +
   theme(legend.position = "none", panel.grid.minor = element_blank(), plot.title = element_text(face = "bold"))
 
@@ -235,7 +241,7 @@ p2b <- ggplot(ci_geol_2021, aes(x = x, color = Geology_Class, fill = Geology_Cla
   geom_line(aes(y = mean_y), size = 1.25) +
   geom_line(aes(y = ci_lower), linetype = "dashed", size = 0.45) +
   geom_line(aes(y = ci_upper), linetype = "dashed", size = 0.45) +
-  scale_color_manual(values = geol_palette) +
+  scale_color_manual(values = geol_palette, name = "Geological Class") +
   scale_fill_manual(values = geol_palette) +
   labs(
     title = "(b) Mean Density Profiles by Geology (with 95% CI Bands)",
@@ -527,7 +533,7 @@ p_temporal_violin <- ggplot(paired_long, aes(x = Year, y = Median_IC, fill = Yea
            label = sprintf("Mean: %.2f\nMed: %.2f", stats_21["mean"], stats_21["med"]), 
            size = 3.6, fontface = "bold", color = "#d95f02") +
   labs(
-    title = "Regional Shift in Sediment Connectivity (1990 vs. 2021)",
+    title = "Lateral Connectivity (1990 vs. 2021)",
     subtitle = "Connecting lines represent individual catchment trajectories | Boxplots show median & IQR",
     x = "Year",
     y = expression("Catchment Median IC [-]")
@@ -549,3 +555,135 @@ out_violin_file <- file.path(out_dir, "Figure_Temporal_Shift_1990_vs_2021_Violin
 ggsave(out_violin_file, plot = p_temporal_violin, width = 7.5, height = 7, dpi = 300)
 
 cat(sprintf("Paired violin plot saved successfully to: %s\n", out_violin_file))
+
+
+# ==============================================================================
+# ANALYSIS & PLOTS: CLIMATE (3 CLASSES) & ARIDITY INDEX (AI)
+# ==============================================================================
+
+library(ggplot2)
+library(dplyr)
+library(cowplot)
+
+# Define column names in your CSV
+col_ai      <- "AI"
+col_climate <- "Climate"
+
+# Ensure columns are extracted into catchment_data
+catchment_data$Climate <- as.factor(trimws(as.character(meta_df[[col_climate]][match(catchment_data$gauge_id, meta_df$gauge_id_clean)])))
+catchment_data$AI      <- as.numeric(meta_df[[col_ai]][match(catchment_data$gauge_id, meta_df$gauge_id_clean)])
+
+# Also tag Climate onto density_data for kernel density envelopes
+density_data$Climate   <- catchment_data$Climate[match(density_data$gauge_id, catchment_data$gauge_id)]
+
+
+# ------------------------------------------------------------------------------
+# 1. CLIMATE ANALYSIS (Categorical: Boxplot + 95% CI Density Envelopes)
+# ------------------------------------------------------------------------------
+cat("\n--- Running Climate Analysis ---\n")
+clim_data <- catchment_data %>% filter(!is.na(Climate))
+
+# Kruskal-Wallis Test across the 3 Climate Classes
+kw_clim_2021 <- kruskal.test(median_2021 ~ Climate, data = clim_data)
+cat(sprintf("Kruskal-Wallis Test across Climate Classes (2021 IC): p = %.4e\n", kw_clim_2021$p.value))
+
+# Pairwise post-hoc comparisons
+posthoc_clim <- pairwise.wilcox.test(clim_data$median_2021, clim_data$Climate, p.adjust.method = "holm")
+print(posthoc_clim)
+
+# 3-Color Palette for Climate Classes
+climate_palette <- c("#e7298a", "#7570b3", "#1b9e77") 
+
+# Panel 4A: Boxplot of Catchment Median IC by Climate
+p4a <- ggplot(clim_data, aes(x = Climate, y = median_2021, fill = Climate)) +
+  geom_boxplot(alpha = 0.65, outlier.shape = NA, color = "black", width = 0.45) +
+  geom_jitter(aes(shape = Regime), width = 0.15, alpha = 0.7, size = 2.4) +
+  scale_fill_manual(values = climate_palette, name = "Climate Class") +
+  annotate("text", x = -Inf, y = Inf, hjust = -0.05, vjust = 1.3,
+           label = sprintf("Kruskal-Wallis Test:\np = %.3e %s", 
+                           kw_clim_2021$p.value,
+                           ifelse(kw_clim_2021$p.value < 0.05, "(Significant)", "(Not Sig.)")),
+           size = 4, fontface = "italic") +
+  labs(
+    title = "(a) Catchment Median IC by Climate Class (2021)",
+    x = "Climate Classification",
+    y = expression("Catchment Median IC"[2021] ~ "[-]")
+  ) +
+  theme_bw(base_size = 13) +
+  theme(legend.position = "right", panel.grid.minor = element_blank())
+
+# Panel 4B: 95% CI Density Envelopes by Climate
+ci_clim_2021 <- density_data %>%
+  filter(Year == "2021" & !is.na(Climate)) %>%
+  group_by(Climate, x) %>%
+  summarize(
+    mean_y   = mean(y),
+    se_y     = sd(y) / sqrt(n()),
+    ci_lower = pmax(0, mean_y - 1.96 * se_y),
+    ci_upper = mean_y + 1.96 * se_y,
+    .groups  = "drop"
+  )
+
+p4b <- ggplot(ci_clim_2021, aes(x = x, color = Climate, fill = Climate)) +
+  geom_ribbon(aes(ymin = ci_lower, ymax = ci_upper), alpha = 0.22, color = NA) +
+  geom_line(aes(y = mean_y), size = 1.25) +
+  geom_line(aes(y = ci_lower), linetype = "dashed", size = 0.5) +
+  geom_line(aes(y = ci_upper), linetype = "dashed", size = 0.5) +
+  scale_color_manual(values = climate_palette, name = "Climate Class") +
+  scale_fill_manual(values = climate_palette, name = "Climate Class") +
+  labs(
+    title = "(b) Mean Density Profiles by Climate (with 95% CI Bands)",
+    x = "Index of Connectivity (IC) [-]",
+    y = "Density"
+  ) +
+  theme_bw(base_size = 13) +
+  theme(legend.position = "right", panel.grid.minor = element_blank())
+
+fig4_combined <- plot_grid(p4a, p4b, nrow = 2, align = "v")
+out_fig4 <- file.path(out_dir, "Figure4_IC_vs_Climate.png")
+ggsave(out_fig4, plot = fig4_combined, width = 9.5, height = 8.5, dpi = 300)
+cat(sprintf("Figure 4 saved to: %s\n", out_fig4))
+
+
+# ------------------------------------------------------------------------------
+# 2. ARIDITY INDEX (AI) ANALYSIS (Continuous Scatter & Regression)
+# ------------------------------------------------------------------------------
+cat("\n--- Running Aridity Index (AI) Analysis ---\n")
+ai_data <- catchment_data %>% filter(!is.na(AI))
+
+# Spearman and Pearson correlation
+cor_ai_spearman <- cor.test(ai_data$AI, ai_data$median_2021, method = "spearman")
+cor_ai_pearson  <- cor.test(ai_data$AI, ai_data$median_2021, method = "pearson")
+
+cat(sprintf("Spearman Correlation (IC vs. AI): rho = %+.3f (p = %.3e)\n", 
+            cor_ai_spearman$estimate, cor_ai_spearman$p.value))
+cat(sprintf("Pearson Correlation  (IC vs. AI): r   = %+.3f (p = %.3e)\n", 
+            cor_ai_pearson$estimate, cor_ai_pearson$p.value))
+
+p5 <- ggplot(ai_data, aes(x = AI, y = median_2021)) +
+  # Points shaped by Climate and colored by Regime
+  geom_point(aes(color = Regime, shape = Climate), size = 2.8, alpha = 0.75) +
+  # Linear regression line with 95% confidence ribbon
+  geom_smooth(method = "lm", color = "#1a365d", fill = "#2b5c8f", alpha = 0.22, size = 1.2) +
+  scale_color_manual(values = c("0" = "#2b5c8f", "1" = "#d95f02"), name = "Regime", labels = c("0" = "Perennial", "1" = "Intermittent")) +
+  annotate("text", x = -Inf, y = Inf, hjust = -0.05, vjust = 1.3,
+           label = sprintf("Spearman rho = %+.3f (p = %.2e)\nPearson r = %+.3f (p = %.2e)", 
+                           cor_ai_spearman$estimate, cor_ai_spearman$p.value,
+                           cor_ai_pearson$estimate, cor_ai_pearson$p.value),
+           size = 4, fontface = "bold.italic", color = "gray20") +
+  labs(
+    title = "Lateral Connectivity (IC) vs. Aridity Index (AI)",
+    subtitle = "Solid line: Linear regression trend | Shaded band: 95% Confidence Interval",
+    x = "Aridity Index (AI) [-]",
+    y = expression("Catchment Median IC"[2021] ~ "[-]")
+  ) +
+  theme_bw(base_size = 14) +
+  theme(
+    legend.position   = "right",
+    panel.grid.minor  = element_blank(),
+    plot.title        = element_text(face = "bold", size = 15)
+  )
+
+out_fig5 <- file.path(out_dir, "Figure5_IC_vs_Aridity_Index.png")
+ggsave(out_fig5, plot = p5, width = 8.5, height = 6.2, dpi = 300)
+cat(sprintf("Figure 5 saved to: %s\n", out_fig5))
