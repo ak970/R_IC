@@ -1,5 +1,5 @@
 # ==============================================================================
-# SEQUENTIAL RESCUE SCRIPT FOR THE 15 FAILED CATCHMENTS
+# SEQUENTIAL RESCUE SCRIPT FOR THE 15 FAILED CATCHMENTS (MULTI-YEAR & CLEAN NAMING)
 # ==============================================================================
 
 library(terra)
@@ -17,7 +17,8 @@ rasterOptions(tolerance = 0.05)
 # Directories
 wd           <- "F:/Peninsular India/Connectivity/IC/Output_Parallel"
 dem_dir      <- "F:/Peninsular India/Connectivity/IC/Input/DEM"
-w_factor_dir <- "F:/Peninsular India/Connectivity/IC/Input/NDVI/2021"
+# Parent directory containing multiple subdirectories with NDVI files
+w_factor_dir <- "F:/Peninsular India/Connectivity/IC/Input/NDVI"
 
 if (!dir.exists(wd)) dir.create(wd, recursive = TRUE)
 setwd(wd)
@@ -26,13 +27,54 @@ setwd(wd)
 target_crs    <- "+proj=aea +lat_1=7 +lat_2=32 +lat_0=20 +lon_0=80 +x_0=2000000 +y_0=2000000 +datum=WGS84 +units=m +no_defs"
 target_res    <- 100
 mw            <- 5
-mpi_cores     <- 4  # Now safe to use 4 cores for TauDEM since we process 1 basin at a time
+mpi_cores     <- 4  # Safe to use 4 cores for TauDEM since we process 1 basin at a time
 
 # The 15 failed gauge IDs (formatted to 5 digits)
 failed_ids_raw <- c(3043, 3073, 3075, 4060, 4062, 8038, 12004, 12020, 12025, 12035, 12046, 13007, 13016, 13017, 14008)
 failed_ids     <- sprintf("%05d", failed_ids_raw)
 
-cat(sprintf("Starting sequential processing for %d failed catchments...\n", length(failed_ids)))
+# ------------------------------------------------------------------------------
+# Scan parent directory recursively and match NDVI files for the failed gauges
+# ------------------------------------------------------------------------------
+cat("Scanning parent directory and subdirectories recursively for NDVI files...\n")
+all_ndvi <- list.files(
+  w_factor_dir, 
+  pattern = "NDVI_[0-9]{4}_[0-9]+\\.(tif|TIF)$", 
+  recursive = TRUE, 
+  full.names = TRUE
+)
+
+rescue_tasks <- data.frame(
+  gauge_id      = character(),
+  year          = character(),
+  dem_path      = character(),
+  w_factor_path = character(),
+  stringsAsFactors = FALSE
+)
+
+for (nf in all_ndvi) {
+  fname    <- basename(nf)
+  year_val <- sub(".*NDVI_([0-9]{4})_([0-9]+)\\..*", "\\1", fname, ignore.case = TRUE)
+  raw_gid  <- sub(".*NDVI_([0-9]{4})_([0-9]+)\\..*", "\\2", fname, ignore.case = TRUE)
+  gid      <- sprintf("%05d", as.numeric(raw_gid))
+  
+  if (gid %in% failed_ids) {
+    dem_p <- file.path(dem_dir, paste0("DEM_", gid, ".tif"))
+    if (file.exists(dem_p)) {
+      rescue_tasks <- rbind(rescue_tasks, data.frame(
+        gauge_id      = gid,
+        year          = year_val,
+        dem_path      = dem_p,
+        w_factor_path = nf,
+        stringsAsFactors = FALSE
+      ))
+    }
+  }
+}
+
+rescue_tasks <- rescue_tasks[order(rescue_tasks$year, rescue_tasks$gauge_id), ]
+cat(sprintf("Found %d rescue task(s) for the %d failed gauge IDs.\n", nrow(rescue_tasks), length(failed_ids)))
+
 
 # ------------------------------------------------------------------------------
 # Byte-compiled flow-length engine
@@ -103,15 +145,16 @@ flow_length_engine_cmp <- compiler::cmpfun(flow_length_engine)
 # ------------------------------------------------------------------------------
 rescue_results <- list()
 
-for (k in seq_along(failed_ids)) {
-  gid   <- failed_ids[k]
-  dem_p <- file.path(dem_dir, paste0("DEM_", gid, ".tif"))
-  wf_p  <- file.path(w_factor_dir, paste0("NDVI_", gid, ".tif"))
+for (k in 1:nrow(rescue_tasks)) {
+  gid      <- rescue_tasks$gauge_id[k]
+  year_str <- rescue_tasks$year[k]
+  dem_p    <- rescue_tasks$dem_path[k]
+  wf_p     <- rescue_tasks$w_factor_path[k]
   
-  cat(sprintf("\n[%d/%d] Processing Gauge %s...\n", k, length(failed_ids), gid))
+  cat(sprintf("\n[%d/%d] Processing Gauge %s | Year %s...\n", k, nrow(rescue_tasks), gid, year_str))
   
-  # Sandbox folder per catchment
-  temp_dir <- file.path(wd, paste0("temp_rescue_", gid))
+  # Sandbox folder per catchment and year
+  temp_dir <- file.path(wd, paste0("temp_rescue_", gid, "_", year_str))
   if (!dir.exists(temp_dir)) dir.create(temp_dir, recursive = TRUE)
   setwd(temp_dir)
   
@@ -224,14 +267,14 @@ for (k in seq_along(failed_ids)) {
     IC <- log10(Dup / Ddn) * mask_cells
     crs(IC) <- crs_out
     
-    # Write final files to main directory
-    writeRaster(IC, file.path(wd, paste0("IC_", target_res, "m_", mw, "x", mw, "_", gid, ".tif")), overwrite = TRUE)
-    writeRaster(Ddn, file.path(wd, paste0("Ddn_", target_res, "m_", mw, "x", mw, "_", gid, ".tif")), overwrite = TRUE)
-    writeRaster(Dup, file.path(wd, paste0("Dup_", target_res, "m_", mw, "x", mw, "_", gid, ".tif")), overwrite = TRUE)
+    # Write final files strictly as IC_year_gaugeID
+    writeRaster(IC, file.path(wd, paste0("IC_", year_str, "_", gid, ".tif")), overwrite = TRUE)
+    writeRaster(Ddn, file.path(wd, paste0("Ddn_", year_str, "_", gid, ".tif")), overwrite = TRUE)
+    writeRaster(Dup, file.path(wd, paste0("Dup_", year_str, "_", gid, ".tif")), overwrite = TRUE)
     
     pal <- colorRampPalette(c("blue", "lightyellow1", "red"))
-    png(file.path(wd, paste0("IC_", target_res, "m_", mw, "x", mw, "_", gid, ".png")), width = 800, height = 800)
-    plot(IC, col = pal(100), main = paste("IC - Gauge", gid))
+    png(file.path(wd, paste0("IC_", year_str, "_", gid, ".png")), width = 800, height = 800)
+    plot(IC, col = pal(100), main = paste("IC - Gauge", gid, "(", year_str, ")"))
     dev.off()
     
     clean <- getValues(IC)
@@ -245,6 +288,7 @@ for (k in seq_along(failed_ids)) {
     
     rescue_results[[k]] <- data.frame(
       gauge_id    = gid,
+      year        = year_str,
       drainage    = as.integer(max_acc),
       valid_cells = length(clean),
       max_IC      = max(clean, na.rm = TRUE),
@@ -258,15 +302,21 @@ for (k in seq_along(failed_ids)) {
   }, error = function(e) {
     setwd(wd)
     unlink(temp_dir, recursive = TRUE)
-    cat(sprintf("  -> ERROR on Gauge %s: %s\n", gid, e$message))
+    cat(sprintf("  -> ERROR on Gauge %s (%s): %s\n", gid, year_str, e$message))
     rescue_results[[k]] <- data.frame(
-      gauge_id = gid, drainage = NA, valid_cells = 0,
-      max_IC = NA, min_IC = NA, median_IC = NA, SD_IC = NA,
-      runtime_min = 0, status = paste("Error:", e$message)
+      gauge_id    = gid,
+      year        = year_str,
+      drainage    = NA,
+      valid_cells = 0,
+      max_IC      = NA,
+      min_IC      = NA,
+      median_IC   = NA,
+      SD_IC       = NA,
+      runtime_min = 0,
+      status      = paste("Error:", e$message)
     )
   })
   
-  # Crucial: Clear RAM before next basin
   gc()
 }
 
@@ -276,17 +326,25 @@ for (k in seq_along(failed_ids)) {
 rescue_df <- dplyr::bind_rows(rescue_results)
 master_csv <- file.path(wd, "stat_IC_batch_parallel.csv")
 
-if (file.exists(master_csv)) {
+if (file.exists(master_csv) && nrow(rescue_df) > 0) {
   old_df <- read.csv(master_csv, stringsAsFactors = FALSE)
   old_df$gauge_id <- sprintf("%05d", as.numeric(old_df$gauge_id))
   
-  # Replace failed rows with rescued rows
-  updated_df <- rbind(old_df[!old_df$gauge_id %in% rescue_df$gauge_id, ], rescue_df)
+  if ("year" %in% names(old_df)) {
+    old_df$year    <- as.character(old_df$year)
+    rescue_df$year <- as.character(rescue_df$year)
+    keys_old       <- paste(old_df$gauge_id, old_df$year, sep = "_")
+    keys_rescue    <- paste(rescue_df$gauge_id, rescue_df$year, sep = "_")
+    updated_df     <- rbind(old_df[!keys_old %in% keys_rescue, ], rescue_df)
+  } else {
+    updated_df <- rbind(old_df[!old_df$gauge_id %in% rescue_df$gauge_id, ], rescue_df)
+  }
+  
   updated_df <- updated_df[order(updated_df$gauge_id), ]
   write.csv(updated_df, master_csv, row.names = FALSE)
   
   cat("\n==================================================\n")
-  cat(sprintf("Master summary updated: %d / 220 catchments now SUCCESSFUL!\n", 
-              sum(updated_df$status == "Success")))
+  cat(sprintf("Master summary updated: %d entries recorded in %s\n", 
+              nrow(updated_df), basename(master_csv)))
   cat("==================================================\n")
 }

@@ -26,7 +26,8 @@ wd <- "F:/Peninsular India/Connectivity/IC/Output_Parallel"
 if (!dir.exists(wd)) dir.create(wd, recursive = TRUE)
 
 dem_dir      <- "F:/Peninsular India/Connectivity/IC/Input/DEM"
-w_factor_dir <- "F:/Peninsular India/Connectivity/IC/Input/NDVI/2021"
+# Parent directory containing multiple subdirectories with NDVI files
+w_factor_dir <- "F:/Peninsular India/Connectivity/IC/Input/NDVI"
 target_path  <- "F:/Peninsular India/CAMELS_IND/CAMELS_IND_Catchments_Streamflow_Sufficient3/shapefiles_catchment/gauge_stations.shp"
 gauge_id_col <- "gauge_id"
 
@@ -40,8 +41,6 @@ snap_radius   <- 2500        # Used only if outlet_method == "gauge_snapping"
 mw            <- 5
 
 # PARALLEL CORES CONFIGURATION
-# Set how many catchments to process simultaneously.
-# Leave 1 or 2 cores free for Windows OS stability.
 available_cores <- parallel::detectCores()
 num_workers     <- max(1, available_cores - 2) # e.g., 6 workers on an 8-core CPU
 cat(sprintf("System has %d CPU cores. Launching %d parallel workers...\n", available_cores, num_workers))
@@ -122,31 +121,54 @@ flow_length_engine_cmp <- compiler::cmpfun(flow_length_engine)
 all_targets <- terra::vect(target_path)
 if (is.na(terra::crs(all_targets)) || terra::crs(all_targets) == "") terra::crs(all_targets) <- "EPSG:4326"
 
-dem_file_list <- list.files(dem_dir, pattern = "^DEM_[0-9]{5}\\.(tif|TIF)$", full.names = TRUE)
 shp_gauge_ids <- trimws(as.character(all_targets[[gauge_id_col]][[1]]))
+
+# Recursive scan of parent directory and all subdirectories for NDVI files
+cat("Scanning parent directory and subdirectories recursively for NDVI files...\n")
+ndvi_file_list <- list.files(
+  w_factor_dir, 
+  pattern = "NDVI_[0-9]{4}_[0-9]+\\.(tif|TIF)$", 
+  recursive = TRUE, 
+  full.names = TRUE
+)
+
+if (length(ndvi_file_list) == 0) {
+  stop("No files matching 'NDVI_xxxx_gaugeID.tif' found in the parent directory or its subdirectories!")
+}
+
+cat(sprintf("Found %d total NDVI files across subdirectories.\n", length(ndvi_file_list)))
 
 batch_list <- data.frame(
   gauge_id      = character(),
+  year          = character(),
   dem_path      = character(),
   w_factor_path = character(),
   stringsAsFactors = FALSE
 )
 
-for (df in dem_file_list) {
-  fname <- basename(df)
-  gid   <- sub(".*DEM_([0-9]{5})\\..*", "\\1", fname, ignore.case = TRUE)
-  wf_path <- file.path(w_factor_dir, paste0("NDVI_", gid, ".tif"))
+for (nf in ndvi_file_list) {
+  fname    <- basename(nf)
+  year_val <- sub(".*NDVI_([0-9]{4})_([0-9]+)\\..*", "\\1", fname, ignore.case = TRUE)
+  raw_gid  <- sub(".*NDVI_([0-9]{4})_([0-9]+)\\..*", "\\2", fname, ignore.case = TRUE)
+  gid      <- sprintf("%05d", as.numeric(raw_gid))
   
-  if (file.exists(wf_path) && any(shp_gauge_ids == gid | sprintf("%05d", suppressWarnings(as.numeric(shp_gauge_ids))) == gid)) {
+  dem_path <- file.path(dem_dir, paste0("DEM_", gid, ".tif"))
+  
+  dem_exists <- file.exists(dem_path)
+  shp_exists <- any(shp_gauge_ids == gid | sprintf("%05d", suppressWarnings(as.numeric(shp_gauge_ids))) == gid)
+  
+  if (dem_exists && shp_exists) {
     batch_list <- rbind(batch_list, data.frame(
       gauge_id      = gid,
-      dem_path      = df,
-      w_factor_path = wf_path,
+      year          = year_val,
+      dem_path      = dem_path,
+      w_factor_path = nf,
       stringsAsFactors = FALSE
     ))
   }
 }
 
+batch_list <- batch_list[order(batch_list$year, batch_list$gauge_id), ]
 cat(sprintf("Ready to process %d catchments across %d parallel workers.\n", nrow(batch_list), num_workers))
 
 
@@ -157,13 +179,14 @@ process_single_catchment <- function(row_idx, batch_df, main_out_dir, target_sha
                                      gauge_col_name, target_crs_str, target_cell_res, 
                                      outlet_sel_mode, snap_dist, mw_tag) {
   
-  gid     <- batch_df$gauge_id[row_idx]
-  dem_p   <- batch_df$dem_path[row_idx]
-  wf_p    <- batch_df$w_factor_path[row_idx]
-  res     <- target_cell_res
+  gid      <- batch_df$gauge_id[row_idx]
+  year_str <- batch_df$year[row_idx]
+  dem_p    <- batch_df$dem_path[row_idx]
+  wf_p     <- batch_df$w_factor_path[row_idx]
+  res      <- target_cell_res
   
   # 1. Create a unique sandbox working directory for this catchment
-  worker_dir <- file.path(main_out_dir, paste0("temp_worker_", gid, "_", Sys.getpid()))
+  worker_dir <- file.path(main_out_dir, paste0("temp_worker_", gid, "_", year_str, "_", Sys.getpid()))
   if (!dir.exists(worker_dir)) dir.create(worker_dir, recursive = TRUE)
   setwd(worker_dir)
   
@@ -305,14 +328,15 @@ process_single_catchment <- function(row_idx, batch_df, main_out_dir, target_sha
     IC <- log10(Dup / Ddn) * mask_cells
     crs(IC) <- crs_out
     
-    # Save final results directly to MAIN output folder
-    writeRaster(IC, file.path(main_out_dir, paste0("IC_", res, "m_", mw_tag, "x", mw_tag, "_", gid, ".tif")), overwrite = TRUE)
-    writeRaster(Ddn, file.path(main_out_dir, paste0("Ddn_", res, "m_", mw_tag, "x", mw_tag, "_", gid, ".tif")), overwrite = TRUE)
-    writeRaster(Dup, file.path(main_out_dir, paste0("Dup_", res, "m_", mw_tag, "x", mw_tag, "_", gid, ".tif")), overwrite = TRUE)
+    # Save final results directly to MAIN output folder with strictly IC_year_gaugeID naming
+    writeRaster(IC, file.path(main_out_dir, paste0("IC_", year_str, "_", gid, ".tif")), overwrite = TRUE)
+    writeRaster(Ddn, file.path(main_out_dir, paste0("Ddn_", year_str, "_", gid, ".tif")), overwrite = TRUE)
+    writeRaster(Dup, file.path(main_out_dir, paste0("Dup_", year_str, "_", gid, ".tif")), overwrite = TRUE)
+    writeRaster(inv_CS, file.path(main_out_dir, paste0("inv_CS_", year_str, "_", gid, ".tif")), overwrite = TRUE)
     
     pal <- colorRampPalette(c("blue", "lightyellow1", "red"))
-    png(file.path(main_out_dir, paste0("IC_", res, "m_", mw_tag, "x", mw_tag, "_", gid, ".png")), width = 800, height = 800)
-    plot(IC, col = pal(100), main = paste("IC - Gauge", gid))
+    png(file.path(main_out_dir, paste0("IC_", year_str, "_", gid, ".png")), width = 800, height = 800)
+    plot(IC, col = pal(100), main = paste("IC - Gauge", gid, "(", year_str, ")"))
     dev.off()
     
     # Calculate statistics
@@ -324,11 +348,12 @@ process_single_catchment <- function(row_idx, batch_df, main_out_dir, target_sha
     unlink(worker_dir, recursive = TRUE)
     
     mins_taken <- as.numeric(difftime(Sys.time(), start_time, units = "mins"))
-    cat(sprintf("[SUCCESS] Gauge %s finished in %.2f min (Iterations: %d | Cells: %d)\n", 
-                gid, mins_taken, iter_count, length(clean)))
+    cat(sprintf("[SUCCESS] Gauge %s (%s) finished in %.2f min (Iterations: %d | Cells: %d)\n", 
+                gid, year_str, mins_taken, iter_count, length(clean)))
     
     return(data.frame(
       gauge_id    = gid,
+      year        = year_str,
       drainage    = as.integer(max_acc),
       valid_cells = length(clean),
       max_IC      = max(clean, na.rm = TRUE),
@@ -342,10 +367,11 @@ process_single_catchment <- function(row_idx, batch_df, main_out_dir, target_sha
   }, error = function(e) {
     setwd(main_out_dir)
     unlink(worker_dir, recursive = TRUE)
-    cat(sprintf("[ERROR] Gauge %s failed: %s\n", gid, e$message))
+    cat(sprintf("[ERROR] Gauge %s (%s) failed: %s\n", gid, year_str, e$message))
     
     return(data.frame(
       gauge_id    = gid,
+      year        = year_str,
       drainage    = NA,
       valid_cells = 0,
       max_IC      = NA,

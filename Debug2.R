@@ -1,7 +1,7 @@
 #### South Asia Albers Equal Area Conic (ESRI:102028)
 
 # ==============================================================================
-# SCRIPT 1: STANDALONE DEBUG SCRIPT (INDIA ALBERS EQUAL-AREA PROJECTION)
+# SCRIPT 2: STANDALONE DEBUG SCRIPT (INDIA ALBERS EQUAL-AREA PROJECTION)
 # ==============================================================================
 
 # 1. Resolve TauDEM PROJ environment conflict
@@ -21,25 +21,30 @@ debug_dir <- "F:/Peninsular India/Connectivity/IC/Debug"
 if (!dir.exists(debug_dir)) dir.create(debug_dir, recursive = TRUE)
 setwd(debug_dir)
 
-# File Paths & Parameters (Change gauge_id as needed: "04039", "03002", "09012", etc.)
+# File Paths & Parameters
 gauge_id     <- "04039"
-dem_path     <- paste0("F:/Peninsular India/Connectivity/IC/Input/DEM/DEM_", gauge_id, ".tif")
-ndvi_path    <- paste0("F:/Peninsular India/Connectivity/IC/Input/NDVI/2021/NDVI_", gauge_id, ".tif")
-target_path  <- "F:/Peninsular India/CAMELS_IND/CAMELS_IND_Catchments_Streamflow_Sufficient3/shapefiles_catchment/gauge_stations.shp"
-gauge_id_col <- "gauge_id"
+year         <- "2021"
+dem_dir      <- "F:/Peninsular India/Connectivity/IC/Input/DEM"
+# Parent directory containing multiple subdirectories with NDVI files
+w_factor_dir <- "F:/Peninsular India/Connectivity/IC/Input/NDVI"
 
-# Initial Projection System: India / South Asia Albers Equal Area Conic (ESRI:102028)
+dem_path     <- file.path(dem_dir, paste0("DEM_", gauge_id, ".tif"))
+
+# Recursively locate NDVI_xxxx_gaugeID.tif in parent directory & subdirectories
+ndvi_pattern <- paste0("NDVI_", year, "_0*", as.numeric(gauge_id), "\\.(tif|TIF)$")
+ndvi_matches <- list.files(w_factor_dir, pattern = ndvi_pattern, recursive = TRUE, full.names = TRUE)
+
+if (length(ndvi_matches) == 0) {
+  stop(sprintf("No NDVI file matching year %s and gauge %s found in %s", year, gauge_id, w_factor_dir))
+}
+ndvi_path    <- ndvi_matches[1]
+
+# India / South Asia Albers Equal Area Conic (ESRI:102028)
 target_crs   <- "+proj=aea +lat_1=7 +lat_2=32 +lat_0=20 +lon_0=80 +x_0=2000000 +y_0=2000000 +datum=WGS84 +units=m +no_defs"
 target_res   <- 100 # 100 meters
+mpi_cores    <- 4
 
-# -------------------------------------------------------------------------
-# OUTLET METHOD: "catchment_outlet" (Recommended) OR "gauge_snapping"
-# -------------------------------------------------------------------------
-outlet_method <- "catchment_outlet"
-snap_radius   <- 2500 # Used only if outlet_method == "gauge_snapping"
-mpi_cores     <- 4
-
-cat(sprintf("\n=================== DEBUG RUN: GAUGE %s (ALBERS EQUAL AREA) ===================\n\n", gauge_id))
+cat(sprintf("\n=================== DEBUG RUN: GAUGE %s (%s) [ALBERS EQUAL AREA] ===================\n\n", gauge_id, year))
 
 # ------------------------------------------------------------------------------
 # STEP 1: Load Raw Inputs & Reproject DEM to India Albers
@@ -93,7 +98,7 @@ W_factor <- C_factor
 writeRaster(W_factor, "W_factor.tif", overwrite = TRUE)
 
 # ------------------------------------------------------------------------------
-# STEP 4: Flow Directions & Outlet Selection
+# STEP 4: Flow Directions & True Catchment Outlet Identification
 # ------------------------------------------------------------------------------
 cat("4. Computing D8 Flow Directions & Locating Outlet...\n")
 system(paste("mpiexec -n", mpi_cores, "D8Flowdir -p D8_flow_dir.tif -sd8 slope_D8.tif -fel dem_pitfilled.tif"))
@@ -103,45 +108,13 @@ slope_D8    <- raster("slope_D8.tif")
 system(paste("mpiexec -n", mpi_cores, "AreaD8 -p D8_flow_dir.tif -ad8 accD8.tif -nc"))
 accD8 <- raster("accD8.tif")
 
-if (outlet_method == "catchment_outlet") {
-  max_cell   <- which.max(getValues(accD8))
-  snapped_xy <- xyFromCell(accD8, max_cell)
-  max_accum  <- max(getValues(accD8), na.rm = TRUE)
-  
-  cat(sprintf("  Catchment Outlet located at X=%.1f, Y=%.1f (Total Drainage: %d cells)\n", 
-              snapped_xy[1], snapped_xy[2], as.integer(max_accum)))
-  
-} else if (outlet_method == "gauge_snapping") {
-  all_targets <- terra::vect(target_path)
-  if (is.na(terra::crs(all_targets)) || terra::crs(all_targets) == "") terra::crs(all_targets) <- "EPSG:4326"
-  
-  shp_ids <- trimws(as.character(all_targets[[gauge_id_col]][[1]]))
-  is_match <- (shp_ids == gauge_id) | (sprintf("%05d", suppressWarnings(as.numeric(shp_ids))) == gauge_id)
-  target_feat <- all_targets[which(is_match)[1], ]
-  target_feat <- terra::project(target_feat, target_crs)
-  
-  buf        <- terra::buffer(target_feat, snap_radius)
-  accD8_t    <- terra::rast("accD8.tif")
-  accD8_crop <- terra::crop(accD8_t, buf)
-  accD8_mask <- terra::mask(accD8_crop, buf)
-  
-  acc_vals <- terra::values(accD8_mask)
-  max_idx  <- which.max(acc_vals)
-  
-  if (length(max_idx) == 0 || is.na(max_idx)) {
-    warning("No accumulation found within buffer; using original coordinates.")
-    snapped_xy <- terra::geom(target_feat)[, c("x", "y")]
-    max_accum  <- 0
-  } else {
-    snapped_xy <- terra::xyFromCell(accD8_mask, max_idx)
-    max_accum  <- acc_vals[max_idx]
-  }
-  
-  cat(sprintf("  Gauge %s snapped to X=%.1f, Y=%.1f (Drainage: %d cells)\n", 
-              gauge_id, snapped_xy[1], snapped_xy[2], as.integer(max_accum)))
-  
-  rm(accD8_t, accD8_crop, accD8_mask); gc()
-}
+# Automatic catchment outlet determination via max accumulation
+max_cell   <- which.max(getValues(accD8))
+snapped_xy <- xyFromCell(accD8, max_cell)
+max_accum  <- max(getValues(accD8), na.rm = TRUE)
+
+cat(sprintf("  Catchment Outlet located at X=%.1f, Y=%.1f (Total Drainage: %d cells)\n", 
+            snapped_xy[1], snapped_xy[2], as.integer(max_accum)))
 
 target_snapped      <- terra::vect(matrix(snapped_xy, ncol = 2), crs = target_crs)
 target_snapped$burn <- 1
@@ -161,9 +134,9 @@ slope_D8_r_m <- reclassify(slope_D8, c(-2, 0.005, 0.005, 1, 10^50, 1))
 writeRaster(slope_D8_r_m, "slope_D8_rec_m.tif", overwrite = TRUE)
 
 inv_CS <- 1 / (W_factor * slope_D8_r_m)
-writeRaster(inv_CS, "inv_CS.tif", overwrite = TRUE)
+writeRaster(inv_CS, paste0("inv_CS_", year, "_", gauge_id, ".tif"), overwrite = TRUE)
 
-# Isolate target index before padding matrix (fixes boundary artifact)
+# Isolate target index before padding matrix to prevent boundary artifacts
 dir8_raw_m <- as.matrix(flow_dir_D8)
 target_idx <- which(is.na(dir8_raw_m), arr.ind = TRUE)
 
@@ -177,11 +150,10 @@ W_FL_m <- rbind(rowadd, W_FL_m, rowadd)
 
 Wgt_m <- W_FL_m 
 
-# Sinks to trace from: ONLY the true outlet
+# Sinks to trace from: ONLY the true target cell
 posrow <- target_idx[, "row"] + 1
 poscol <- target_idx[, "col"] + 1
 
-# Initial search across all 8 cardinal directions
 r1 <- posrow;     c1 <- poscol - 1; idx1 <- which(dir8_m[cbind(r1, c1)] == 1); pos1row_0 <- r1[idx1]; pos1col_0 <- c1[idx1]; W_FL_m[cbind(pos1row_0, pos1col_0)] <- 0
 r2 <- posrow + 1; c2 <- poscol - 1; idx2 <- which(dir8_m[cbind(r2, c2)] == 2); pos2row_0 <- r2[idx2]; pos2col_0 <- c2[idx2]; W_FL_m[cbind(pos2row_0, pos2col_0)] <- 0
 r3 <- posrow + 1; c3 <- poscol;     idx3 <- which(dir8_m[cbind(r3, c3)] == 3); pos3row_0 <- r3[idx3]; pos3col_0 <- c3[idx3]; W_FL_m[cbind(pos3row_0, pos3col_0)] <- 0
@@ -238,7 +210,7 @@ while ((length(pos1col_0) | length(pos2col_0) | length(pos3col_0) | length(pos4c
 
 cat(sprintf("  Flow length loop finished in %d iterations!\n", count))
 
-# Remove matrix boundary padding
+# Remove boundary padding
 W_FL_m <- W_FL_m[-1, ]; W_FL_m <- W_FL_m[-nrow(W_FL_m), ]
 dir8_m <- dir8_m[-1, ]; dir8_m <- dir8_m[-nrow(dir8_m), ]
 W_FL_m <- W_FL_m[, -1]; W_FL_m <- W_FL_m[, -ncol(W_FL_m)] 
@@ -255,7 +227,7 @@ writeRaster(mask_cells, "mask_cells.tif", overwrite = TRUE)
 
 Ddn <- ((W_FL_fin == 0) * inv_CS) + W_FL_fin
 crs(Ddn) <- crs_out
-writeRaster(Ddn, "Ddn.tif", overwrite = TRUE)
+writeRaster(Ddn, paste0("Ddn_", year, "_", gauge_id, ".tif"), overwrite = TRUE)
 
 rm(Wgt_m, W_FL_m, dir8_m, dif_WFL, inv_CS, flow_dir_D8); gc()
 
@@ -284,11 +256,12 @@ cmean        <- (accW + W_factor) / Acc_fin
 
 Dup <- cmean * smean * (Acc_fin * constant_res^2)^(1/2)
 crs(Dup) <- crs_out
-writeRaster(Dup, "Dup.tif", overwrite = TRUE)
+writeRaster(Dup, paste0("Dup_", year, "_", gauge_id, ".tif"), overwrite = TRUE)
+
 rm(constant_res, ang, Acc_fin, smean, accW, cmean); gc()
 
 # ------------------------------------------------------------------------------
-# STEP 7: Final Index of Connectivity (IC) WITH Clean mask_cells
+# STEP 7: Final Index of Connectivity (IC) Named IC_year_gaugeID
 # ------------------------------------------------------------------------------
 cat("7. Calculating Final Index of Connectivity with mask_cells...\n")
 ratio <- Dup / Ddn
@@ -296,13 +269,14 @@ IC    <- log10(ratio)
 IC    <- IC * mask_cells
 crs(IC) <- crs_out
 
+# Preview Plot strictly named IC_year_gaugeID.png
 pal <- colorRampPalette(c("blue", "lightyellow1", "red"))
-png(paste0("IC_", gauge_id, ".png"), width = 800, height = 800)
-plot(IC, col = pal(100), main = paste("Index of Connectivity (IC) - Catchment", gauge_id))
+png(paste0("IC_", year, "_", gauge_id, ".png"), width = 800, height = 800)
+plot(IC, col = pal(100), main = paste("Index of Connectivity (IC) - Catchment", gauge_id, "(", year, ")"))
 dev.off()
 
-plot(IC, col = pal(100), main = paste("Index of Connectivity (IC) - Catchment", gauge_id))
-writeRaster(IC, paste0("IC_", gauge_id, ".tif"), overwrite = TRUE)
+# Final Raster strictly named IC_year_gaugeID.tif
+writeRaster(IC, paste0("IC_", year, "_", gauge_id, ".tif"), overwrite = TRUE)
 
 cat("\n=================== FINAL STATUS ===================\n")
 valid_mask  <- sum(!is.na(getValues(mask_cells)))

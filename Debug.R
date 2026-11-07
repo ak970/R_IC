@@ -21,15 +21,29 @@ debug_dir <- "F:/Peninsular India/Connectivity/IC/Debug"
 if (!dir.exists(debug_dir)) dir.create(debug_dir, recursive = TRUE)
 setwd(debug_dir)
 
-# File Paths & Parameters (Change gauge_id as needed)
-gauge_id    <- "04007"
-dem_path    <- paste0("F:/Peninsular India/Connectivity/IC/Input/DEM/DEM_", gauge_id, ".tif")
-ndvi_path   <- paste0("F:/Peninsular India/Connectivity/IC/Input/NDVI/2021/NDVI_", gauge_id, ".tif")
-target_crs  <- "EPSG:32644" # WGS 84 / UTM Zone 44N
-target_res  <- 100          # 100 meters
-mpi_cores   <- 4
+# File Paths & Parameters
+gauge_id     <- "04007"
+year         <- "2021"
+dem_dir      <- "F:/Peninsular India/Connectivity/IC/Input/DEM"
+# Parent directory containing multiple subdirectories with NDVI files
+w_factor_dir <- "F:/Peninsular India/Connectivity/IC/Input/NDVI"
 
-cat(sprintf("\n=================== RUNNING DEBUG WITH MASK_CELLS: GAUGE %s ===================\n\n", gauge_id))
+dem_path     <- file.path(dem_dir, paste0("DEM_", gauge_id, ".tif"))
+
+# Recursively locate NDVI_xxxx_gaugeID.tif in parent directory & subdirectories
+ndvi_pattern <- paste0("NDVI_", year, "_0*", as.numeric(gauge_id), "\\.(tif|TIF)$")
+ndvi_matches <- list.files(w_factor_dir, pattern = ndvi_pattern, recursive = TRUE, full.names = TRUE)
+
+if (length(ndvi_matches) == 0) {
+  stop(sprintf("No NDVI file matching year %s and gauge %s found in %s", year, gauge_id, w_factor_dir))
+}
+ndvi_path    <- ndvi_matches[1]
+
+target_crs   <- "EPSG:32644" # WGS 84 / UTM Zone 44N
+target_res   <- 100          # 100 meters
+mpi_cores    <- 4
+
+cat(sprintf("\n=================== RUNNING DEBUG WITH MASK_CELLS: GAUGE %s (%s) ===================\n\n", gauge_id, year))
 
 # ------------------------------------------------------------------------------
 # STEP 1: Load Raw Inputs & Reproject DEM
@@ -119,7 +133,7 @@ slope_D8_r_m <- reclassify(slope_D8, c(-2, 0.005, 0.005, 1, 10^50, 1))
 writeRaster(slope_D8_r_m, "slope_D8_rec_m.tif", overwrite = TRUE)
 
 inv_CS <- 1 / (W_factor * slope_D8_r_m)
-writeRaster(inv_CS, "inv_CS.tif", overwrite = TRUE)
+writeRaster(inv_CS, paste0("inv_CS_", year, "_", gauge_id, ".tif"), overwrite = TRUE)
 
 # FIX FOR BOUNDARY VALUES: Find target index BEFORE padding matrix
 dir8_raw_m <- as.matrix(flow_dir_D8)
@@ -189,7 +203,7 @@ pos8col_NA <- poscol - 1; pos8row_NA <- posrow - 1
 pos8rowt <- pos8row_NA[pos8row_NA != 0]; pos8colt <- pos8col_NA[pos8row_NA != 0]
 pos8row <- pos8rowt[pos8rowt != 0]; pos8col <- pos8colt[pos8rowt != 0]
 pos8dir <- dir8_m[cbind(pos8row, pos8col)]
-pos8row_0 <- pos8row[which(pos8dir == 8)]; pos8col_0 <- poscol[which(pos8dir == 8)]
+pos8row_0 <- pos8row[which(pos8dir == 8)]; pos8col_0 <- pos8col[which(pos8dir == 8)]
 W_FL_m[cbind(pos8row_0, pos8col_0)] <- 0
 
 count <- 1
@@ -224,43 +238,15 @@ while ((length(pos1col_0) | length(pos2col_0) | length(pos3col_0) | length(pos4c
   pos0row_bis <- c(pos1row_0, pos2row_0, pos3row_0, pos4row_0, pos5row_0, pos6row_0, pos7row_0, pos8row_0)
   pos0col_bis <- c(pos1col_0, pos2col_0, pos3col_0, pos4col_0, pos5col_0, pos6col_0, pos7col_0, pos8col_0)
   
-  poscolt <- pos0col_bis - 1; posrowt <- pos0row_bis
-  posrow <- posrowt[poscolt != 0]; poscol <- poscolt[poscolt != 0]
-  posdir <- dir8_m[cbind(posrow, poscol)]
-  pos1row_0 <- posrow[which(posdir == 1)]; pos1col_0 <- poscol[which(posdir == 1)]
-  
-  poscolt <- pos0col_bis - 1; posrowt <- pos0row_bis + 1
-  posrow <- posrowt[poscolt != 0]; poscol <- poscolt[poscolt != 0]
-  posdir <- dir8_m[cbind(posrow, poscol)]
-  pos2row_0 <- posrow[which(posdir == 2)]; pos2col_0 <- poscol[which(posdir == 2)]
-  
-  poscol <- pos0col_bis; posrow <- pos0row_bis + 1
-  posdir <- dir8_m[cbind(posrow, poscol)]
-  pos3row_0 <- posrow[which(posdir == 3)]; pos3col_0 <- poscol[which(posdir == 3)]
-  
-  poscol <- pos0col_bis + 1; posrow <- pos0row_bis + 1
-  posdir <- dir8_m[cbind(posrow, poscol)]
-  pos4row_0 <- posrow[which(posdir == 4)]; pos4col_0 <- poscol[which(posdir == 4)]
-  
-  poscol <- pos0col_bis + 1; posrow <- pos0row_bis
-  posdir <- dir8_m[cbind(posrow, poscol)]
-  pos5row_0 <- posrow[which(posdir == 5)]; pos5col_0 <- poscol[which(posdir == 5)]
-  
-  poscolt <- pos0col_bis + 1; posrowt <- pos0row_bis - 1
-  posrow <- posrowt[posrowt != 0]; poscol <- poscolt[posrowt != 0]
-  posdir <- dir8_m[cbind(posrow, poscol)]
-  pos6row_0 <- posrow[which(posdir == 6)]; pos6col_0 <- poscol[which(posdir == 6)]
-  
-  poscolt <- pos0col_bis; posrowt <- pos0row_bis - 1
-  posrow <- posrowt[posrowt != 0]; poscol <- poscolt[posrowt != 0]
-  posdir <- dir8_m[cbind(posrow, poscol)]
-  pos7row_0 <- posrow[which(posdir == 7)]; pos7col_0 <- poscol[which(posdir == 7)]
-  
-  poscolt <- pos0col_bis - 1; posrowt <- pos0row_bis - 1
-  posrowt1 <- posrowt[posrowt != 0]; poscolt1 <- poscolt[posrowt != 0]
-  posrow <- posrowt1[poscolt1 != 0]; poscol <- poscolt1[poscolt1 != 0]
-  posdir <- dir8_m[cbind(posrow, poscol)]
-  pos8row_0 <- posrow[which(posdir == 8)]; pos8col_0 <- poscol[which(posdir == 8)]
+  # Clean 8-direction offset search
+  r1 <- pos0row_bis;     c1 <- pos0col_bis - 1; idx1 <- which(dir8_m[cbind(r1, c1)] == 1); pos1row_0 <- r1[idx1]; pos1col_0 <- c1[idx1]
+  r2 <- pos0row_bis + 1; c2 <- pos0col_bis - 1; idx2 <- which(dir8_m[cbind(r2, c2)] == 2); pos2row_0 <- r2[idx2]; pos2col_0 <- c2[idx2]
+  r3 <- pos0row_bis + 1; c3 <- pos0col_bis;     idx3 <- which(dir8_m[cbind(r3, c3)] == 3); pos3row_0 <- r3[idx3]; pos3col_0 <- c3[idx3]
+  r4 <- pos0row_bis + 1; c4 <- pos0col_bis + 1; idx4 <- which(dir8_m[cbind(r4, c4)] == 4); pos4row_0 <- r4[idx4]; pos4col_0 <- c4[idx4]
+  r5 <- pos0row_bis;     c5 <- pos0col_bis + 1; idx5 <- which(dir8_m[cbind(r5, c5)] == 5); pos5row_0 <- r5[idx5]; pos5col_0 <- c5[idx5]
+  r6 <- pos0row_bis - 1; c6 <- pos0col_bis + 1; idx6 <- which(dir8_m[cbind(r6, c6)] == 6); pos6row_0 <- r6[idx6]; pos6col_0 <- c6[idx6]
+  r7 <- pos0row_bis - 1; c7 <- pos0col_bis;     idx7 <- which(dir8_m[cbind(r7, c7)] == 7); pos7row_0 <- r7[idx7]; pos7col_0 <- c7[idx7]
+  r8 <- pos0row_bis - 1; c8 <- pos0col_bis - 1; idx8 <- which(dir8_m[cbind(r8, c8)] == 8); pos8row_0 <- r8[idx8]; pos8col_0 <- c8[idx8]
   
   count <- count + 1
 }
@@ -288,7 +274,7 @@ writeRaster(mask_cells, "mask_cells.tif", overwrite = TRUE)
 
 Ddn <- ((W_FL_fin == 0) * inv_CS) + W_FL_fin
 crs(Ddn) <- crs_out
-writeRaster(Ddn, "Ddn.tif", overwrite = TRUE)
+writeRaster(Ddn, paste0("Ddn_", year, "_", gauge_id, ".tif"), overwrite = TRUE)
 
 # Cleanup Ddn memory
 rm(Wgt_m, W_FL_m, dir8_m, dif_WFL, inv_CS, flow_dir_D8); gc()
@@ -318,33 +304,32 @@ cmean        <- (accW + W_factor) / Acc_fin
 
 Dup <- cmean * smean * (Acc_fin * constant_res^2)^(1/2)
 crs(Dup) <- crs_out
-writeRaster(Dup, "Dup.tif", overwrite = TRUE)
+writeRaster(Dup, paste0("Dup_", year, "_", gauge_id, ".tif"), overwrite = TRUE)
 
 rm(constant_res, ang, Acc_fin, smean, accW, cmean); gc()
 
 # ------------------------------------------------------------------------------
-# STEP 8: Final Index of Connectivity (IC) WITH mask_cells
+# STEP 8: Final Index of Connectivity (IC) Named IC_year_gaugeID
 # ------------------------------------------------------------------------------
 cat("7. Calculating Final Index of Connectivity with mask_cells...\n")
 ratio <- Dup / Ddn
 
-# Apply mask_cells to neatly clip to the watershed
 IC <- log10(ratio)
 IC <- IC * mask_cells
 crs(IC) <- crs_out
 
-# Preview Plot
+# Preview Plot strictly named IC_year_gaugeID.png
 pal <- colorRampPalette(c("blue", "lightyellow1", "red"))
-png(paste0("IC_", gauge_id, ".png"), width = 800, height = 800)
-plot(IC, col = pal(100), main = paste("Index of Connectivity (IC) - Catchment", gauge_id))
+png(paste0("IC_", year, "_", gauge_id, ".png"), width = 800, height = 800)
+plot(IC, col = pal(100), main = paste("Index of Connectivity (IC) - Catchment", gauge_id, "(", year, ")"))
 dev.off()
 
-plot(IC, col = pal(100), main = paste("Index of Connectivity (IC) - Catchment", gauge_id))
-writeRaster(IC, paste0("IC_", gauge_id, ".tif"), overwrite = TRUE)
+# Final Raster strictly named IC_year_gaugeID.tif
+writeRaster(IC, paste0("IC_", year, "_", gauge_id, ".tif"), overwrite = TRUE)
 
 cat("\n=================== FINAL STATUS ===================\n")
-valid_mask <- sum(!is.na(getValues(mask_cells)))
-valid_ic   <- sum(!is.na(getValues(IC)))
+valid_mask  <- sum(!is.na(getValues(mask_cells)))
+valid_ic    <- sum(!is.na(getValues(IC)))
 total_cells <- length(getValues(IC))
 
 cat(sprintf("Valid Cells in mask_cells : %d (%.1f%% of DEM)\n", valid_mask, (valid_mask / total_cells) * 100))

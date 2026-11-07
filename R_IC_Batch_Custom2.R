@@ -1,8 +1,6 @@
-#### South Asia Albers Equal Area Conic (ESRI:102028)
-
-# Title: Batch R_IC v. 3.4 (Batch 220 Sites: India Albers, Dual Outlet Selector, Corrected 8-Dir)
+# Title: Batch R_IC v. 3.6 (Clean IC_year_gaugeID Naming + Multi-Year Batch Processing)
 # Author details: Tommaso Baggio, Lorenzo Martini, Loris Torresani
-# Production batch script for 220 CAMELS-IND catchments
+# Production batch script for CAMELS-IND catchments across multiple years
 
 # 1. Resolve TauDEM PROJ environment conflict
 if (dir.exists(system.file("proj", package = "terra"))) {
@@ -23,12 +21,14 @@ rasterOptions(tolerance = 0.05)
 # INPUTS & DIRECTORIES SETUP
 ###################################
 
-wd <- "F:/Peninsular India/Connectivity/IC/Output"
+# Main output directory
+wd <- "F:/Peninsular India/NDVI/download/NDVI/Test/IC_output"
 if (!dir.exists(wd)) dir.create(wd, recursive = TRUE)
 setwd(wd)
 
 dem_dir      <- "F:/Peninsular India/Connectivity/IC/Input/DEM"
-w_factor_dir <- "F:/Peninsular India/Connectivity/IC/Input/NDVI/1990"
+# Parent directory containing multiple subdirectories with NDVI files
+w_factor_dir <- "F:/Peninsular India/NDVI/download/NDVI/Test/Output3"
 target_path  <- "F:/Peninsular India/CAMELS_IND/CAMELS_IND_Catchments_Streamflow_Sufficient3/shapefiles_catchment/gauge_stations.shp"
 gauge_id_col <- "gauge_id"
 
@@ -37,20 +37,20 @@ target_crs   <- "+proj=aea +lat_1=7 +lat_2=32 +lat_0=20 +lon_0=80 +x_0=2000000 +
 target_res   <- 100          # 100 meters
 
 # -------------------------------------------------------------------------
-# OUTLET METHOD SELECTOR (Choose your preferred method):
+# OUTLET METHOD SELECTOR:
 # "catchment_outlet" = Automatically finds the true river outlet (max accumulation)
 # "gauge_snapping"   = Uses the gauge station shapefile point snapped within snap_radius
 # -------------------------------------------------------------------------
 outlet_method <- "catchment_outlet"
 snap_radius   <- 2500        # Search radius used only if outlet_method == "gauge_snapping"
 
-mw <- 5
-flag_k <- 0
+mw        <- 5
+flag_k    <- 0
 mpi_cores <- 4
 
 
 ###################################
-# LOAD MASTER TARGET SHAPEFILE & MATCH FILES
+# LOAD MASTER TARGET SHAPEFILE & MATCH MULTI-YEAR FILES
 ###################################
 
 cat("Loading master gauge stations shapefile...\n")
@@ -61,47 +61,66 @@ if (is.na(terra::crs(all_targets)) || terra::crs(all_targets) == "") {
   terra::crs(all_targets) <- "EPSG:4326"
 }
 
-dem_file_list <- list.files(dem_dir, pattern = "^DEM_[0-9]{5}\\.(tif|TIF)$", full.names = TRUE)
-if (length(dem_file_list) == 0) {
-  dem_file_list <- list.files(dem_dir, pattern = "\\.(tif|TIF)$", full.names = TRUE)
-  dem_file_list <- dem_file_list[grepl("DEM_", basename(dem_file_list), ignore.case = TRUE)]
+shp_gauge_ids <- trimws(as.character(all_targets[[gauge_id_col]][[1]]))
+
+# 1. Scan the parent directory recursively for all NDVI files matching NDVI_xxxx_gaugeID.tif
+cat("Scanning parent directory and subdirectories for NDVI files...\n")
+ndvi_file_list <- list.files(
+  w_factor_dir, 
+  pattern = "NDVI_[0-9]{4}_[0-9]+\\.(tif|TIF)$", 
+  recursive = TRUE, 
+  full.names = TRUE
+)
+
+if (length(ndvi_file_list) == 0) {
+  stop("No files matching 'NDVI_xxxx_gaugeID.tif' found in the parent directory or its subdirectories!")
 }
 
+cat(sprintf("Found %d total NDVI files across subdirectories.\n", length(ndvi_file_list)))
+
+# 2. Build batch list pairing each (year, gauge_id) NDVI file with its static DEM
 batch_list <- data.frame(
   gauge_id      = character(),
+  year          = character(),
   dem_path      = character(),
   w_factor_path = character(),
   stringsAsFactors = FALSE
 )
 
-shp_gauge_ids <- trimws(as.character(all_targets[[gauge_id_col]][[1]]))
-
-for (df in dem_file_list) {
-  fname <- basename(df)
-  gid   <- sub(".*DEM_([0-9]{5})\\..*", "\\1", fname, ignore.case = TRUE)
-  wf_path <- file.path(w_factor_dir, paste0("NDVI_", gid, ".tif"))
+for (nf in ndvi_file_list) {
+  fname <- basename(nf)
   
-  wf_exists  <- file.exists(wf_path)
+  # Extract 4-digit Year and Gauge ID
+  year_val <- sub(".*NDVI_([0-9]{4})_([0-9]+)\\..*", "\\1", fname, ignore.case = TRUE)
+  raw_gid  <- sub(".*NDVI_([0-9]{4})_([0-9]+)\\..*", "\\2", fname, ignore.case = TRUE)
+  gid      <- sprintf("%05d", as.numeric(raw_gid))
+  
+  # Corresponding DEM path (topography is static for a given catchment)
+  dem_path <- file.path(dem_dir, paste0("DEM_", gid, ".tif"))
+  
+  dem_exists <- file.exists(dem_path)
   shp_exists <- any(shp_gauge_ids == gid | sprintf("%05d", suppressWarnings(as.numeric(shp_gauge_ids))) == gid)
   
-  if (wf_exists && shp_exists) {
+  if (dem_exists && shp_exists) {
     batch_list <- rbind(batch_list, data.frame(
       gauge_id      = gid,
-      dem_path      = df,
-      w_factor_path = wf_path,
+      year          = year_val,
+      dem_path      = dem_path,
+      w_factor_path = nf,
       stringsAsFactors = FALSE
     ))
   }
 }
 
-cat(sprintf("Found %d matched datasets ready for processing.\n", nrow(batch_list)))
+batch_list <- batch_list[order(batch_list$year, batch_list$gauge_id), ]
+cat(sprintf("Successfully matched %d (year, gauge_id) datasets ready for processing.\n", nrow(batch_list)))
 
 
 ###################################################################################################################
 # PROCESSING FUNCTION
 ###################################################################################################################
 
-IC_function <- function(dem_t, wf_t, target_feat, mw, flag_k, site_id, outlet_method, snap_radius) {
+IC_function <- function(dem_t, wf_t, target_feat, mw, flag_k, site_id, year_str, outlet_method, snap_radius) {
   
   start_timeTOT <- Sys.time()
   res <- target_res
@@ -186,8 +205,8 @@ IC_function <- function(dem_t, wf_t, target_feat, mw, flag_k, site_id, outlet_me
     rm(accD8_t, accD8_crop, accD8_mask); gc()
   }
   
-  cat(sprintf("  Target for gauge %s set to X=%.1f, Y=%.1f (Drainage: %d cells)\n", 
-              site_id, snapped_xy[1, 1], snapped_xy[1, 2], as.integer(max_acc)))
+  cat(sprintf("  Target for gauge %s (%s) set to X=%.1f, Y=%.1f (Drainage: %d cells)\n", 
+              site_id, year_str, snapped_xy[1, 1], snapped_xy[1, 2], as.integer(max_acc)))
   
   target_snapped      <- terra::vect(matrix(snapped_xy, ncol = 2), crs = target_crs)
   target_snapped$burn <- 1
@@ -206,8 +225,9 @@ IC_function <- function(dem_t, wf_t, target_feat, mw, flag_k, site_id, outlet_me
   writeRaster(slope_D8_r_m, "slope_D8_rec_m.tif", overwrite = TRUE)
   
   inv_CS <- 1 / (W_factor * slope_D8_r_m)
-  writeRaster(inv_CS, paste0("inv_CS_", res, "m_", mw, "x", mw, "_", site_id, ".tif"), overwrite = TRUE)
+  writeRaster(inv_CS, paste0("inv_CS_", year_str, "_", site_id, ".tif"), overwrite = TRUE)
   
+  # Isolate target index before padding matrix to prevent boundary artifacts
   dir8_raw_m <- as.matrix(flow_dir_D8)
   target_idx <- which(is.na(dir8_raw_m), arr.ind = TRUE)
   
@@ -279,6 +299,7 @@ IC_function <- function(dem_t, wf_t, target_feat, mw, flag_k, site_id, outlet_me
   
   gc()
   
+  # Remove padding
   W_FL_m <- W_FL_m[-1, ]; W_FL_m <- W_FL_m[-nrow(W_FL_m), ]
   dir8_m <- dir8_m[-1, ]; dir8_m <- dir8_m[-nrow(dir8_m), ]
   W_FL_m <- W_FL_m[, -1]; W_FL_m <- W_FL_m[, -ncol(W_FL_m)] 
@@ -286,6 +307,7 @@ IC_function <- function(dem_t, wf_t, target_feat, mw, flag_k, site_id, outlet_me
   
   ext <- as.matrix(extent(inv_CS))
   W_FL_fin <- raster(W_FL_m, xmn = ext[1, 1], xmx = ext[1, 2], ymn = ext[2, 1], ymx = ext[2, 2], crs = crs_out)
+  writeRaster(W_FL_fin, "Weighted_Flow_length.tif", overwrite = TRUE)
   
   dif_WFL <- W_FL_fin - inv_CS
   dif_WFL[dif_WFL == 0] <- NA
@@ -293,7 +315,7 @@ IC_function <- function(dem_t, wf_t, target_feat, mw, flag_k, site_id, outlet_me
   
   Ddn <- ((W_FL_fin == 0) * inv_CS) + W_FL_fin
   crs(Ddn) <- crs_out
-  writeRaster(Ddn, paste0("Ddn_", res, "m_", mw, "x", mw, "_", site_id, ".tif"), overwrite = TRUE)
+  writeRaster(Ddn, paste0("Ddn_", year_str, "_", site_id, ".tif"), overwrite = TRUE)
   
   rm(Wgt_m, W_FL_m, dir8_m, dif_WFL, inv_CS, flow_dir_D8); gc()
   
@@ -321,22 +343,25 @@ IC_function <- function(dem_t, wf_t, target_feat, mw, flag_k, site_id, outlet_me
   
   Dup <- cmean * smean * (Acc_fin * constant_res^2)^(1/2)
   crs(Dup) <- crs_out
-  writeRaster(Dup, paste0("Dup_", res, "m_", mw, "x", mw, "_", site_id, ".tif"), overwrite = TRUE)
+  writeRaster(Dup, paste0("Dup_", year_str, "_", site_id, ".tif"), overwrite = TRUE)
   rm(constant_res, ang, Acc_fin, smean, accW, cmean); gc()
   
   # --------------------------------------------------------------------------
-  # 7. Final IC Calculation
+  # 7. Final IC Calculation: IC_year_gaugeID
   # --------------------------------------------------------------------------
   IC <- log10(Dup / Ddn)
   IC <- IC * mask_cells
   crs(IC) <- crs_out
   
   pal <- colorRampPalette(c("blue", "lightyellow1", "red"))
-  png(paste0("IC_", res, "m_", mw, "x", mw, "_", site_id, ".png"), width = 800, height = 800)
-  plot(IC, col = pal(100), main = paste("IC - Gauge", site_id))
+  
+  # Preview Plot named strictly as IC_year_gaugeID.png
+  png(paste0("IC_", year_str, "_", site_id, ".png"), width = 800, height = 800)
+  plot(IC, col = pal(100), main = paste("IC - Gauge", site_id, "(", year_str, ")"))
   dev.off()
   
-  writeRaster(IC, paste0("IC_", res, "m_", mw, "x", mw, "_", site_id, ".tif"), overwrite = TRUE)
+  # Final GeoTIFF named strictly as IC_year_gaugeID.tif
+  writeRaster(IC, paste0("IC_", year_str, "_", site_id, ".tif"), overwrite = TRUE)
   
   if (flag_k == 0) {
     tmp_files <- c("accS.tif", "accW.tif", "ang.tif", "D8_flow_dir.tif", 
@@ -348,15 +373,15 @@ IC_function <- function(dem_t, wf_t, target_feat, mw, flag_k, site_id, outlet_me
   
   end_timeTOT <- Sys.time()
   mins_taken  <- as.numeric(difftime(end_timeTOT, start_timeTOT, units = "mins"))
-  cat(sprintf("Done with gauge %s in %.2f minutes (Iterations: %d | Drainage: %d cells).\n", 
-              site_id, mins_taken, count, as.integer(max_acc)))
+  cat(sprintf("Done with gauge %s (%s) in %.2f minutes (Iterations: %d | Drainage: %d cells).\n", 
+              site_id, year_str, mins_taken, count, as.integer(max_acc)))
   
   return(IC)
 }
 
 
 ###################################################################################################################
-# RUN BATCH LOOP OVER ALL SITES
+# RUN BATCH LOOP OVER ALL SITES & YEARS
 ###################################################################################################################
 
 data_IC <- batch_list
@@ -372,9 +397,11 @@ data_IC$SD_IC       <- NA
 
 for (i in 1:nrow(batch_list)) {
   
-  gid <- batch_list$gauge_id[i]
-  cat(sprintf("\n==================================================\nProcessing gauge [%d/%d]: %s\n==================================================\n", 
-              i, nrow(batch_list), gid))
+  gid  <- batch_list$gauge_id[i]
+  yval <- batch_list$year[i]
+  
+  cat(sprintf("\n==================================================\nProcessing [%d/%d]: Gauge %s | Year %s\n==================================================\n", 
+              i, nrow(batch_list), gid, yval))
   
   tryCatch({
     dem_t <- terra::rast(batch_list$dem_path[i])
@@ -384,10 +411,19 @@ for (i in 1:nrow(batch_list)) {
       (sprintf("%05d", suppressWarnings(as.numeric(shp_gauge_ids))) == gid)
     target_feat <- all_targets[which(is_match)[1], ]
     
-    IC <- IC_function(dem_t = dem_t, wf_t = wf_t, target_feat = target_feat, mw = mw, 
-                      flag_k = flag_k, site_id = gid, outlet_method = outlet_method, snap_radius = snap_radius)
+    IC <- IC_function(
+      dem_t         = dem_t, 
+      wf_t          = wf_t, 
+      target_feat   = target_feat, 
+      mw            = mw, 
+      flag_k        = flag_k, 
+      site_id       = gid, 
+      year_str      = yval, 
+      outlet_method = outlet_method, 
+      snap_radius   = snap_radius
+    )
     
-    IC_val <- getValues(IC)
+    IC_val    <- getValues(IC)
     clean_val <- IC_val[!is.na(IC_val)]
     
     data_IC[i, "valid_cells"] <- length(clean_val)
@@ -397,12 +433,12 @@ for (i in 1:nrow(batch_list)) {
     data_IC[i, "SD_IC"]       <- sd(clean_val, na.rm = TRUE)
     
   }, error = function(e) {
-    cat(sprintf("ERROR encountered in gauge %s: %s\nSkipping to next gauge...\n", gid, e$message))
+    cat(sprintf("ERROR encountered in gauge %s (%s): %s\nSkipping to next item...\n", gid, yval, e$message))
   })
 }
 
 # Export summary CSV
 write.csv(data_IC, file = file.path(wd, "stat_IC_batch.csv"), row.names = FALSE)
 cat("\n==================================================\n")
-cat("Full batch processing successfully completed!\n")
+cat("Full multi-year batch processing successfully completed!\n")
 cat(sprintf("Results saved in: %s\n", wd))
