@@ -1,0 +1,5 @@
+"Variable","Label","r_rmcorr","p_value"
+"annual_precip","Annual Precipitation [mm]",0.019435371914375,0.373133750716967
+"annual_temp","Annual Mean Temperature [°C]",-0.055036797932763,0.0116121838524744
+"annual_pet","Annual Potential Evapotranspiration [mm]",-0.105048446282638,1.3880627840404e-06
+"annual_ai","Aridity Index (P/PET) [-]",0.0113325723224824,0.603566503684364
